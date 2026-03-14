@@ -4,7 +4,6 @@ const fetch = require('node-fetch');
 const app = express();
 app.use(express.json());
 
-// ─── Obtener token dinámico desde la página de SUNAT ─────────────────────────
 let tokenCache = { value: null, expira: 0 };
 
 async function obtenerToken() {
@@ -19,7 +18,6 @@ async function obtenerToken() {
         'Accept-Language': 'es-PE,es;q=0.9',
       }
     });
-
     const html = await res.text();
     const match = html.match(/name="token"\s+value="([^"]+)"/);
     if (match) {
@@ -30,11 +28,40 @@ async function obtenerToken() {
   } catch (e) {
     console.error('Error obteniendo token:', e.message);
   }
-
-  // Fallback al token conocido
   return 'vjnescsa6cooxlp5g4sgcld1adhbe2ku1vr73v8mo9qteyl4zez9';
 }
 
+// ─── Endpoint debug: ver HTML crudo que devuelve SUNAT ────────────────────────
+app.get('/api/debug/:query', async (req, res) => {
+  const razon = req.params.query.replace(/\+/g, ' ');
+  const token = await obtenerToken();
+
+  const body = new URLSearchParams({
+    accion: 'consPorRazonSoc', razSoc: razon.toUpperCase(),
+    nroRuc: '', nrodoc: '', token, contexto: 'ti-it',
+    modo: '1', search1: '', tipdoc: '1', search2: '',
+    rbtnTipo: '3', search3: razon.toUpperCase(), codigo: ''
+  });
+
+  const response = await fetch('https://e-consultaruc.sunat.gob.pe/cl-ti-itmrconsruc/jcrS00Alias', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/x-www-form-urlencoded',
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+      'Origin': 'https://e-consultaruc.sunat.gob.pe',
+      'Referer': 'https://e-consultaruc.sunat.gob.pe/cl-ti-itmrconsruc/FrameCriterioBusquedaWeb.jsp',
+      'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+      'Accept-Language': 'es-PE,es;q=0.9',
+    },
+    body: body.toString()
+  });
+
+  const html = await response.text();
+  // Devolver los primeros 3000 caracteres del HTML para ver qué llega
+  res.json({ token_usado: token, html_preview: html.substring(0, 3000) });
+});
+
+// ─── Ruta principal ───────────────────────────────────────────────────────────
 app.get(['/api/ruc', '/api/ruc/:query'], async (req, res) => {
   let razon = '';
 
@@ -56,19 +83,10 @@ app.get(['/api/ruc', '/api/ruc/:query'], async (req, res) => {
     const token = await obtenerToken();
 
     const body = new URLSearchParams({
-      accion:   'consPorRazonSoc',
-      razSoc:   razon.toUpperCase(),
-      nroRuc:   '',
-      nrodoc:   '',
-      token,
-      contexto: 'ti-it',
-      modo:     '1',
-      search1:  '',
-      tipdoc:   '1',
-      search2:  '',
-      rbtnTipo: '3',
-      search3:  razon.toUpperCase(),
-      codigo:   ''
+      accion: 'consPorRazonSoc', razSoc: razon.toUpperCase(),
+      nroRuc: '', nrodoc: '', token, contexto: 'ti-it',
+      modo: '1', search1: '', tipdoc: '1', search2: '',
+      rbtnTipo: '3', search3: razon.toUpperCase(), codigo: ''
     });
 
     const response = await fetch('https://e-consultaruc.sunat.gob.pe/cl-ti-itmrconsruc/jcrS00Alias', {
@@ -132,6 +150,7 @@ app.get('/', (req, res) => {
     uso: {
       path_param:   '/api/ruc/NOMBRES+APELLIDOS',
       query_string: '/api/ruc?q=efrain luis ureta alvarez',
+      debug:        '/api/debug/efrain+ureta'
     }
   });
 });

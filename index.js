@@ -4,215 +4,96 @@ const fetch = require('node-fetch');
 const app = express();
 app.use(express.json());
 
-// ─── Cache de sesión ──────────────────────────────────────────────────────────
-let sesionCache = {
-  security: null,
-  cc_token: null,
-  cc_sig: null,
-  cookies: null,
-  expira: 0
-};
-
-// ─── Obtener tokens reales desde el HTML ──────────────────────────────────────
-async function obtenerTokens() {
-  const ahora = Date.now();
-
-  // Reusar caché si no ha expirado (10 minutos)
-  if (sesionCache.security && ahora < sesionCache.expira) {
-    return sesionCache;
-  }
-
-  console.log('🔄 Obteniendo nuevos tokens...');
-
-  const headersNavegador = {
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
-    'Accept-Language': 'es-PE,es;q=0.9,en;q=0.8',
-    'Accept-Encoding': 'gzip, deflate, br',
-    'Connection': 'keep-alive',
-    'Upgrade-Insecure-Requests': '1',
-    'Sec-Fetch-Dest': 'document',
-    'Sec-Fetch-Mode': 'navigate',
-    'Sec-Fetch-Site': 'none',
-    'Sec-Fetch-User': '?1',
-    'Cache-Control': 'max-age=0',
-  };
-
-  try {
-    const res = await fetch('https://dniperu.com/buscar-dni-por-nombre/', {
-      method: 'GET',
-      headers: headersNavegador,
-      redirect: 'follow',
-    });
-
-    const rawCookies = res.headers.raw()['set-cookie'] || [];
-    const cookies = rawCookies.map(c => c.split(';')[0]).join('; ');
-    const html = await res.text();
-
-    let security = null;
-    const patronesSecurity = [
-      /"security"\s*:\s*"([a-f0-9]{10})"/,
-      /security['"]\s*:\s*['"]([\w]+)['"]/,
-      /nonce['"]\s*:\s*['"]([\w]+)['"]/,
-      /var\s+security\s*=\s*['"]([\w]+)['"]/,
-    ];
-    for (const patron of patronesSecurity) {
-      const m = html.match(patron);
-      if (m) { security = m[1]; break; }
-    }
-
-    let cc_token = null;
-    const patronesToken = [
-      /["']cc_token["']\s*:\s*["']([a-f0-9]+)["']/,
-      /cc_token['"]\s*[=:]\s*['"]([\w]+)['"]/,
-    ];
-    for (const patron of patronesToken) {
-      const m = html.match(patron);
-      if (m) { cc_token = m[1]; break; }
-    }
-
-    let cc_sig = null;
-    const patronesSig = [
-      /["']cc_sig["']\s*:\s*["']([a-f0-9]+)["']/,
-      /cc_sig['"]\s*[=:]\s*['"]([\w]+)['"]/,
-    ];
-    for (const patron of patronesSig) {
-      const m = html.match(patron);
-      if (m) { cc_sig = m[1]; break; }
-    }
-
-    console.log(`Tokens → security: ${security}, cc_token: ${cc_token ? 'OK' : 'null'}, cc_sig: ${cc_sig ? 'OK' : 'null'}`);
-
-    if (security) {
-      sesionCache = {
-        security,
-        cc_token: cc_token || '',
-        cc_sig: cc_sig || '',
-        cookies,
-        expira: ahora + 10 * 60 * 1000
-      };
-      return sesionCache;
-    }
-
-    return null;
-
-  } catch (e) {
-    console.error('Error obteniendo tokens:', e.message);
-    return null;
-  }
-}
-
-// ─── Hacer la consulta al endpoint ───────────────────────────────────────────
-async function consultarDNI(nombres, apellido_paterno, apellido_materno, tokens) {
-  const boundary = '----WebKitFormBoundary' + Math.random().toString(36).substring(2, 18);
-
-  const campos = [
-    ['nombres', nombres],
-    ['apellido_paterno', apellido_paterno],
-    ['apellido_materno', apellido_materno],
-    ['company', ''],
-    ['action', 'buscar_dni'],
-    ['security', tokens.security],
-    ['cc_token', tokens.cc_token || ''],
-    ['cc_sig', tokens.cc_sig || ''],
-  ];
-
-  let body = '';
-  for (const [key, value] of campos) {
-    body += `--${boundary}\r\nContent-Disposition: form-data; name="${key}"\r\n\r\n${value}\r\n`;
-  }
-  body += `--${boundary}--\r\n`;
-
-  const headers = {
-    'Content-Type': `multipart/form-data; boundary=${boundary}`,
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-    'Origin': 'https://dniperu.com',
-    'Referer': 'https://dniperu.com/buscar-dni-por-nombre/',
-    'Accept': '*/*',
-    'Accept-Language': 'es-PE,es;q=0.9',
-    'Sec-Fetch-Dest': 'empty',
-    'Sec-Fetch-Mode': 'cors',
-    'Sec-Fetch-Site': 'same-origin',
-    'X-Requested-With': 'XMLHttpRequest',
-  };
-
-  if (tokens.cookies) headers['Cookie'] = tokens.cookies;
-
-  const response = await fetch('https://dniperu.com/wp-admin/admin-ajax.php', {
-    method: 'POST',
-    headers,
-    body,
-  });
-
-  const contentType = response.headers.get('content-type') || '';
-  if (!contentType.includes('application/json')) {
-    const text = await response.text();
-    console.error('Respuesta no JSON:', text.substring(0, 200));
-    throw new Error('TOKENS_EXPIRADOS');
-  }
-
-  return await response.json();
-}
-
-// ─── Ruta principal ───────────────────────────────────────────────────────────
-app.get(['/api/buscar', '/api/buscar/:query'], async (req, res) => {
-  let nombres = '';
-  let apellido_paterno = '';
-  let apellido_materno = '';
+app.get(['/api/ruc', '/api/ruc/:query'], async (req, res) => {
+  let razon = '';
 
   if (req.params.query) {
-    const partes = req.params.query.trim().split(/[\+\s]+/);
-    nombres = partes[0] || '';
-    apellido_paterno = partes[1] || '';
-    apellido_materno = partes[2] || '';
+    razon = req.params.query.trim().replace(/\+/g, ' ');
   } else {
-    nombres = (req.query.nombres || req.query.nombre || '').trim();
-    apellido_paterno = (req.query.ap || req.query.apellido_paterno || '').trim();
-    apellido_materno = (req.query.am || req.query.apellido_materno || '').trim();
+    razon = (req.query.q || req.query.razon || '').trim();
   }
 
-  if (!nombres && !apellido_paterno) {
+  if (!razon) {
     return res.status(400).json({
       estado: false,
-      mensaje: 'Debes enviar al menos nombres o apellido_paterno.',
-      uso: [
-        '/api/buscar/alexander+bracho+ferrer',
-        '/api/buscar?nombres=alexander&ap=bracho&am=ferrer'
-      ]
+      mensaje: 'Debes enviar un nombre.',
+      uso: ['/api/ruc/alexander+bracho+ferrer', '/api/ruc?q=alexander bracho ferrer']
     });
   }
 
   try {
-    let tokens = await obtenerTokens();
+    const body = new URLSearchParams({
+      accion:   'consPorRazonSoc',
+      razSoc:   razon.toUpperCase(),
+      nroRuc:   '',
+      nrodoc:   '',
+      token:    'b7bhejm01ifqtovn3f7dp8kx5wfwcpd8tr03k0zfnkx3jjui8603',
+      contexto: 'ti-it',
+      modo:     '1',
+      search1:  '',
+      tipdoc:   '1',
+      search2:  '',
+      rbtnTipo: '3',
+      search3:  razon.toUpperCase(),
+      codigo:   ''
+    });
 
-    if (!tokens) {
-      return res.status(503).json({
-        estado: false,
-        mensaje: 'Cloudflare está bloqueando. Usa POST /api/tokens para inyectar tokens manualmente.'
+    const response = await fetch('https://e-consultaruc.sunat.gob.pe/cl-ti-itmrconsruc/jcrS00Alias', {
+      method: 'POST',
+      headers: {
+        'Content-Type':    'application/x-www-form-urlencoded',
+        'User-Agent':      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+        'Origin':          'https://e-consultaruc.sunat.gob.pe',
+        'Referer':         'https://e-consultaruc.sunat.gob.pe/cl-ti-itmrconsruc/FrameCriterioBusquedaWeb.jsp',
+        'Accept':          'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        'Accept-Language': 'es-PE,es;q=0.9',
+      },
+      body: body.toString()
+    });
+
+    const html = await response.text();
+
+    // Parsear bloques aRucs
+    const resultados = [];
+    const bloqueRegex = /<a[^>]+data-ruc="(\d+)"[^>]*>([\s\S]*?)<\/a>/gi;
+    const h4Regex = /<h4[^>]*>([\s\S]*?)<\/h4>/gi;
+    const pRegex = /<p[^>]*>([\s\S]*?)<\/p>/gi;
+    const stripHtml = s => s.replace(/<[^>]+>/g, '').replace(/&oacute;/g,'ó').replace(/&aacute;/g,'á').replace(/&eacute;/g,'é').replace(/&iacute;/g,'í').replace(/&uacute;/g,'ú').replace(/&ntilde;/g,'ñ').replace(/&amp;/g,'&').trim();
+
+    let bloque;
+    while ((bloque = bloqueRegex.exec(html)) !== null) {
+      const ruc = bloque[1]; // ej: 10749415105
+      const contenido = bloque[2];
+
+      // Extraer h4s
+      const h4s = [];
+      let h4;
+      const h4Pat = /<h4[^>]*>([\s\S]*?)<\/h4>/gi;
+      while ((h4 = h4Pat.exec(contenido)) !== null) {
+        h4s.push(stripHtml(h4[1]));
+      }
+
+      // Extraer ubicación del p
+      let ubicacion = '';
+      const pMatch = /<p[^>]*>([\s\S]*?)<\/p>/i.exec(contenido);
+      if (pMatch) ubicacion = stripHtml(pMatch[1]).replace(/^Ubicaci[oó]n:\s*/i, '');
+
+      // Convertir RUC a DNI: quitar 2 primeros dígitos y último dígito
+      // RUC persona natural: 10 + DNI(8) + dígito = 11 dígitos
+      const dni = ruc.length === 11 ? ruc.slice(2, 10) : null;
+
+      // Nombre: segundo h4 (el primero dice "RUC: ...")
+      const nombre = h4s[1] || h4s[0] || '';
+
+      resultados.push({
+        ruc,
+        dni,
+        nombre_completo: nombre,
+        ubicacion
       });
     }
 
-    let data;
-    try {
-      data = await consultarDNI(nombres, apellido_paterno, apellido_materno, tokens);
-    } catch (e) {
-      if (e.message === 'TOKENS_EXPIRADOS') {
-        console.log('🔁 Tokens expirados, renovando...');
-        sesionCache.expira = 0;
-        tokens = await obtenerTokens();
-        if (!tokens) {
-          return res.status(503).json({
-            estado: false,
-            mensaje: 'Tokens expirados. Usa POST /api/tokens para actualizarlos manualmente.'
-          });
-        }
-        data = await consultarDNI(nombres, apellido_paterno, apellido_materno, tokens);
-      } else {
-        throw e;
-      }
-    }
-
-    if (!data.success || !data.data?.resultados?.length) {
+    if (!resultados.length) {
       return res.status(404).json({
         estado: false,
         mensaje: 'No se encontraron resultados.'
@@ -222,14 +103,8 @@ app.get(['/api/buscar', '/api/buscar/:query'], async (req, res) => {
     return res.json({
       estado: true,
       mensaje: 'Resultados encontrados',
-      total: data.data.resultados.length,
-      resultados: data.data.resultados.map(r => ({
-        dni: r.numero,
-        nombres: r.nombres,
-        apellido_paterno: r.apellido_paterno,
-        apellido_materno: r.apellido_materno,
-        nombre_completo: `${r.nombres} ${r.apellido_paterno} ${r.apellido_materno}`.trim()
-      }))
+      total: resultados.length,
+      resultados
     });
 
   } catch (e) {
@@ -237,35 +112,14 @@ app.get(['/api/buscar', '/api/buscar/:query'], async (req, res) => {
   }
 });
 
-// ─── Inyectar tokens manualmente desde el navegador ──────────────────────────
-// POST /api/tokens  body: { security, cc_token, cc_sig, cookies }
-app.post('/api/tokens', (req, res) => {
-  const { security, cc_token, cc_sig, cookies } = req.body;
-  if (!security) return res.status(400).json({ estado: false, mensaje: 'Falta security' });
-
-  sesionCache = {
-    security,
-    cc_token: cc_token || '',
-    cc_sig: cc_sig || '',
-    cookies: cookies || '',
-    expira: Date.now() + 30 * 60 * 1000
-  };
-
-  console.log('✅ Tokens actualizados manualmente');
-  res.json({ estado: true, mensaje: 'Tokens actualizados, válidos por 30 minutos.' });
-});
-
-// ─── Estado ───────────────────────────────────────────────────────────────────
 app.get('/', (req, res) => {
   res.json({
     estado: true,
-    mensaje: 'API DNI Peru - Búsqueda por nombre activa',
-    version: '2.0.0',
-    tokens_activos: !!sesionCache.security,
-    tokens_expiran: sesionCache.expira ? new Date(sesionCache.expira).toISOString() : null,
+    mensaje: 'API SUNAT - Búsqueda por nombre activa',
+    version: '1.0.0',
     uso: {
-      buscar: '/api/buscar/alexander+bracho+ferrer',
-      actualizar_tokens: 'POST /api/tokens { security, cc_token, cc_sig, cookies }'
+      path_param:   '/api/ruc/NOMBRE+APELLIDO',
+      query_string: '/api/ruc?q=alexander bracho ferrer',
     }
   });
 });

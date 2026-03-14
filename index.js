@@ -4,6 +4,37 @@ const fetch = require('node-fetch');
 const app = express();
 app.use(express.json());
 
+// ─── Obtener token dinámico desde la página de SUNAT ─────────────────────────
+let tokenCache = { value: null, expira: 0 };
+
+async function obtenerToken() {
+  const ahora = Date.now();
+  if (tokenCache.value && ahora < tokenCache.expira) return tokenCache.value;
+
+  try {
+    const res = await fetch('https://e-consultaruc.sunat.gob.pe/cl-ti-itmrconsruc/FrameCriterioBusquedaWeb.jsp', {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        'Accept-Language': 'es-PE,es;q=0.9',
+      }
+    });
+
+    const html = await res.text();
+    const match = html.match(/name="token"\s+value="([^"]+)"/);
+    if (match) {
+      tokenCache = { value: match[1], expira: ahora + 20 * 60 * 1000 };
+      console.log('Token obtenido:', match[1]);
+      return match[1];
+    }
+  } catch (e) {
+    console.error('Error obteniendo token:', e.message);
+  }
+
+  // Fallback al token conocido
+  return 'vjnescsa6cooxlp5g4sgcld1adhbe2ku1vr73v8mo9qteyl4zez9';
+}
+
 app.get(['/api/ruc', '/api/ruc/:query'], async (req, res) => {
   let razon = '';
 
@@ -17,17 +48,19 @@ app.get(['/api/ruc', '/api/ruc/:query'], async (req, res) => {
     return res.status(400).json({
       estado: false,
       mensaje: 'Debes enviar un nombre.',
-      uso: ['/api/ruc/alexander+bracho+ferrer', '/api/ruc?q=alexander bracho ferrer']
+      uso: ['/api/ruc/efrain+luis+ureta+alvarez', '/api/ruc?q=efrain luis ureta alvarez']
     });
   }
 
   try {
+    const token = await obtenerToken();
+
     const body = new URLSearchParams({
       accion:   'consPorRazonSoc',
       razSoc:   razon.toUpperCase(),
       nroRuc:   '',
       nrodoc:   '',
-      token:    'b7bhejm01ifqtovn3f7dp8kx5wfwcpd8tr03k0zfnkx3jjui8603',
+      token,
       contexto: 'ti-it',
       modo:     '1',
       search1:  '',
@@ -52,60 +85,39 @@ app.get(['/api/ruc', '/api/ruc/:query'], async (req, res) => {
     });
 
     const html = await response.text();
-
-    // Parsear bloques aRucs
     const resultados = [];
     const bloqueRegex = /<a[^>]+data-ruc="(\d+)"[^>]*>([\s\S]*?)<\/a>/gi;
-    const h4Regex = /<h4[^>]*>([\s\S]*?)<\/h4>/gi;
-    const pRegex = /<p[^>]*>([\s\S]*?)<\/p>/gi;
-    const stripHtml = s => s.replace(/<[^>]+>/g, '').replace(/&oacute;/g,'ó').replace(/&aacute;/g,'á').replace(/&eacute;/g,'é').replace(/&iacute;/g,'í').replace(/&uacute;/g,'ú').replace(/&ntilde;/g,'ñ').replace(/&amp;/g,'&').trim();
+    const stripHtml = s => s.replace(/<[^>]+>/g, '')
+      .replace(/&oacute;/g,'ó').replace(/&aacute;/g,'á')
+      .replace(/&eacute;/g,'é').replace(/&iacute;/g,'í')
+      .replace(/&uacute;/g,'ú').replace(/&ntilde;/g,'ñ')
+      .replace(/&amp;/g,'&').trim();
 
     let bloque;
     while ((bloque = bloqueRegex.exec(html)) !== null) {
-      const ruc = bloque[1]; // ej: 10749415105
+      const ruc = bloque[1];
       const contenido = bloque[2];
 
-      // Extraer h4s
       const h4s = [];
-      let h4;
       const h4Pat = /<h4[^>]*>([\s\S]*?)<\/h4>/gi;
-      while ((h4 = h4Pat.exec(contenido)) !== null) {
-        h4s.push(stripHtml(h4[1]));
-      }
+      let h4;
+      while ((h4 = h4Pat.exec(contenido)) !== null) h4s.push(stripHtml(h4[1]));
 
-      // Extraer ubicación del p
       let ubicacion = '';
       const pMatch = /<p[^>]*>([\s\S]*?)<\/p>/i.exec(contenido);
       if (pMatch) ubicacion = stripHtml(pMatch[1]).replace(/^Ubicaci[oó]n:\s*/i, '');
 
-      // Convertir RUC a DNI: quitar 2 primeros dígitos y último dígito
-      // RUC persona natural: 10 + DNI(8) + dígito = 11 dígitos
       const dni = ruc.length === 11 ? ruc.slice(2, 10) : null;
-
-      // Nombre: segundo h4 (el primero dice "RUC: ...")
       const nombre = h4s[1] || h4s[0] || '';
 
-      resultados.push({
-        ruc,
-        dni,
-        nombre_completo: nombre,
-        ubicacion
-      });
+      resultados.push({ ruc, dni, nombre_completo: nombre, ubicacion });
     }
 
     if (!resultados.length) {
-      return res.status(404).json({
-        estado: false,
-        mensaje: 'No se encontraron resultados.'
-      });
+      return res.status(404).json({ estado: false, mensaje: 'No se encontraron resultados.' });
     }
 
-    return res.json({
-      estado: true,
-      mensaje: 'Resultados encontrados',
-      total: resultados.length,
-      resultados
-    });
+    return res.json({ estado: true, mensaje: 'Resultados encontrados', total: resultados.length, resultados });
 
   } catch (e) {
     return res.status(500).json({ estado: false, mensaje: 'Error interno: ' + e.message });
@@ -116,10 +128,10 @@ app.get('/', (req, res) => {
   res.json({
     estado: true,
     mensaje: 'API SUNAT - Búsqueda por nombre activa',
-    version: '1.0.0',
+    version: '2.0.0',
     uso: {
-      path_param:   '/api/ruc/NOMBRE+APELLIDO',
-      query_string: '/api/ruc?q=alexander bracho ferrer',
+      path_param:   '/api/ruc/NOMBRES+APELLIDOS',
+      query_string: '/api/ruc?q=efrain luis ureta alvarez',
     }
   });
 });
